@@ -1,7 +1,8 @@
-from threading import Lock
 import time
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import List, Dict, Optional
+
 import numpy as np
 
 from script_generator.video.video_info import VideoInfo
@@ -49,14 +50,13 @@ class Task:
             if start_key in self.profile and end_key in self.profile:
                 self.profile[duration_key] = self.profile[end_key] - self.profile[start_key]
 
+
 @dataclass
 class AnalyseVideoTask(Task):
-    video: VideoInfo = None
     tasks: List[Task] = field(default_factory=list)
 
-    def __init__(self, video: VideoInfo):
+    def __init__(self):
         super().__init__()
-        self.video = video
         self.tasks = []
         self._lock = Lock()
         self.profile = {}
@@ -73,8 +73,9 @@ class AnalyseVideoTask(Task):
 
 
 @dataclass
-class ProcessFrameTask(Task):
-    frame: int = -1
+class AnalyseFrameTask(Task):
+    frame_pos: int = -1
     preprocessed_frame: Optional[np.ndarray] = None  # Cropped frame from video stream
     rendered_frame: Optional[np.ndarray] = None  # The final 2D image from OpenGL
-    detections: List = field(default_factory=list)  # YOLO detection results
+    yolo_results = None
+    # detections: List[Detection] = field(default_factory=list) # YOLO detection results

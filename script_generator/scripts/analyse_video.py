@@ -1,43 +1,48 @@
 import queue
-import string
 import threading
 import time
+from typing import List
 
+from colorama import Fore, Style
 from tqdm import tqdm
-from colorama import Fore
 
 from script_generator.config import QUEUE_MAXSIZE, SEQUENTIAL_MODE, PROGRESS_BAR, UPDATE_PROGRESS_INTERVAL
-from script_generator.video_conversion.vr_to_2d_task_processor import VrTo2DTaskProcessor
+from script_generator.gui.messages.messages import ProgressMessage
+from script_generator.object_detection.post_process_results import YoloAnalysisTaskProcessor
+from script_generator.object_detection.yolo import YoloTaskProcessor
+from script_generator.state.app_state import AppState
 from script_generator.tasks.abstract_task_processor import TaskProcessorTypes
-from script_generator.tasks.tasks import AnalyseVideoTask
-from script_generator.video.ffmpeg import get_video_info
+from script_generator.tasks.tasks import AnalyseVideoTask, AnalyseFrameTask
+from script_generator.video.video_conversion.vr_to_2d_task_processor import VrTo2DTaskProcessor
 from script_generator.video.video_task_processor import VideoTaskProcessor
-from script_generator.yolo.yolo import YoloTaskProcessor
 
 
-def analyse_video(video_path: string, result_queue: queue.Queue):
+def analyse_video(state: AppState) -> List[AnalyseFrameTask]:
     print(f"[OBJECT DETECTION] Starting up pipeline with profiling in {'sequential mode' if SEQUENTIAL_MODE else 'parallel mode'}...")
 
+    use_open_gl = state.video_reader == "FFmpeg + OpenGL (Windows)"
+
     # Initialize batch task
-    video = get_video_info(video_path)
-    batch_task = AnalyseVideoTask(video)
+    state.set_video_info()
+    state.analyse_task = AnalyseVideoTask()
 
     # Create queues
-    opengl_queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
-    yolo_queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
-    # yolo_analysis_queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
+    opengl_q = queue.Queue(maxsize=QUEUE_MAXSIZE)
+    yolo_q = queue.Queue(maxsize=QUEUE_MAXSIZE)
+    analysis_q = queue.Queue(maxsize=QUEUE_MAXSIZE)
+    result_q = queue.Queue(maxsize=0)
 
-    # create threads
-    decode_thread = VideoTaskProcessor(batch_task=batch_task, output_queue=opengl_queue)
-    opengl_thread = VrTo2DTaskProcessor(batch_task=batch_task, input_queue=opengl_queue, output_queue=yolo_queue)
-    yolo_thread = YoloTaskProcessor(batch_task=batch_task, input_queue=yolo_queue, output_queue=result_queue)
-    # yolo_analysis_thread = YoloAnalysisTaskProcessor(batch_task=batch_task, input_queue=yolo_analysis_queue, output_queue=result_queue)
+    # Create threads
+    decode_thread = VideoTaskProcessor(state=state, output_queue=opengl_q if use_open_gl else yolo_q)
+    opengl_thread = VrTo2DTaskProcessor(state=state, input_queue=opengl_q, output_queue=yolo_q) if use_open_gl else None
+    yolo_thread = YoloTaskProcessor(state=state, input_queue=yolo_q, output_queue=analysis_q)
+    yolo_analysis_thread = YoloAnalysisTaskProcessor(state=state, input_queue=analysis_q, output_queue=result_q)
 
     # Start logging thread
     log_thread_stop_event = threading.Event()
     queue_logging_thread = threading.Thread(
         target=log_progress,
-        args=(batch_task, opengl_queue, yolo_queue, result_queue, log_thread_stop_event),
+        args=(state, opengl_q, yolo_q, analysis_q, result_q, log_thread_stop_event),
         daemon=True,
     )
     queue_logging_thread.start()
@@ -51,27 +56,32 @@ def analyse_video(video_path: string, result_queue: queue.Queue):
             out_queue.put(None)
             print(f"[OBJECT DETECTION] {thread_name} thread done in {time.time() - start_time} s")
 
-        run_thread(decode_thread, TaskProcessorTypes.VIDEO, opengl_queue)
-        run_thread(opengl_thread, TaskProcessorTypes.OPENGL, yolo_queue)
-        run_thread(yolo_thread, TaskProcessorTypes.YOLO_ANALYSIS, result_queue)
-        # run_thread(yolo_analysis_thread, "YOLO analysis")
+        run_thread(decode_thread, TaskProcessorTypes.VIDEO, opengl_q)
+        if use_open_gl:
+            run_thread(opengl_thread, TaskProcessorTypes.OPENGL, yolo_q)
+        run_thread(yolo_thread, TaskProcessorTypes.YOLO, analysis_q)
+        run_thread(yolo_analysis_thread, TaskProcessorTypes.YOLO_ANALYSIS, result_q)
     else:
-        threads = [decode_thread, opengl_thread, yolo_thread]  # , yolo_analysis_thread
+        threads = [decode_thread, opengl_thread, yolo_thread, yolo_analysis_thread] if use_open_gl else [decode_thread, yolo_thread, yolo_analysis_thread]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
 
-    batch_task.end_time = time.time()
+    state.analyse_task.end_time = time.time()
+
+    log_thread_stop_event.set()
 
     # wait for update progress thread to close
-    time.sleep(UPDATE_PROGRESS_INTERVAL)
+    time.sleep(UPDATE_PROGRESS_INTERVAL * 1.1)
 
-    log_performance(batch_task=batch_task, results_queue=result_queue)
+    log_performance(state=state, results_queue=result_q)
+
+    return result_q.queue
 
 
-def log_progress(batch_task, opengl_q, yolo_q, results_q, stop_event):
-    total_frames = batch_task.video.total_frames
+def log_progress(state, opengl_q, yolo_q, analysis_q, results_q, stop_event):
+    total_frames = state.video_info.total_frames
 
     if PROGRESS_BAR:
         with tqdm(
@@ -86,44 +96,65 @@ def log_progress(batch_task, opengl_q, yolo_q, results_q, stop_event):
             while not stop_event.is_set():
                 opengl_size = opengl_q.qsize()
                 yolo_size = yolo_q.qsize()
-                results_size = results_q.qsize()
+                analysis_size = analysis_q.qsize()
+                frames_processed = results_q.qsize()
 
-                progress_bar.n = results_size
+                progress_bar.n = frames_processed
+                open_gl = f"OpenGL: {opengl_size:>3}, " if state.video_reader == "FFmpeg + OpenGL (Windows)" else ""
                 progress_bar.set_postfix_str(
-                    f"Queues: OpenGL: {opengl_size:>3}, YOLO: {yolo_size:>3}"
+                    f"Queues: {open_gl}YOLO: {yolo_size:>3}, Analysis: {analysis_size:>3}"
                 )
                 progress_bar.refresh()
 
-                if results_size >= total_frames:
+                if frames_processed >= total_frames:
                     stop_event.set()
+
+                if state.update_ui:
+                    elapsed_time = time.time() - state.analyse_task.start_time
+                    processing_rate = frames_processed / elapsed_time if elapsed_time > 0 else 0
+                    remaining_frames = total_frames - frames_processed
+                    eta = remaining_frames / processing_rate if processing_rate > 0 else float('inf')
+                    try:
+                        state.update_ui(ProgressMessage(
+                            process="OBJECT_DETECTION",
+                            frames_processed=frames_processed,
+                            total_frames=total_frames,
+                            eta=time.strftime("%H:%M:%S", time.gmtime(eta)) if eta != float('inf') else "Calculating..."
+                        ))
+                    except Exception as e:
+                        print(f"Error in state.update_ui: {e}")
 
                 time.sleep(UPDATE_PROGRESS_INTERVAL)
     else:
         while not stop_event.is_set():
             opengl_size = opengl_q.qsize()
             yolo_size = yolo_q.qsize()
-            results_size = results_q.qsize()
-            print(f"Queues: OpenGL: {opengl_size:>3}, YOLO: {yolo_size:>3}, DONE: {results_size:>3}")
+            analysis_size = analysis_q.size()
+            frames_processed = results_q.qsize()
+            open_gl = f"OpenGL: {opengl_size:>3}, " if state.video_reader == "FFmpeg + OpenGL (Windows)" else ""
+            print(f"Queues: {open_gl}YOLO: {yolo_size:>3}, Analysis: {analysis_size:>3}, DONE: {frames_processed:>3}")
 
-            if results_size >= total_frames:
+            if frames_processed >= total_frames:
                 stop_event.set()
 
             time.sleep(0.5)
 
-
-
-def log_performance(batch_task, results_queue):
+def log_performance(state, results_queue):
+    analyse_task = state.analyse_task
+    # TODO filter out sentinals in task processor
     tasks = [task for task in results_queue.queue if task is not None and hasattr(task, 'profile')]
     total_frames = len(tasks)
 
-    total_pipeline_time = batch_task.end_time - batch_task.start_time
-    video_duration = total_frames / batch_task.video.fps
+    total_pipeline_time = analyse_task.end_time - analyse_task.start_time
+    video_duration = total_frames / state.video_info.fps
     avg_processing_fps = total_frames / total_pipeline_time
     realtime_percentage = (avg_processing_fps / 60.0) * 100.0
 
     log_message = (
         f"\n{'-' * 60}"
-        f"\n OBJECT DETECTION COMPLETED {'(sequential mode)' if SEQUENTIAL_MODE else '(parallel mode)'}\n"
+        f"\n OBJECT DETECTION COMPLETED {'(sequential mode)' if SEQUENTIAL_MODE else ''}\n"
+        f"\n Settings\n"
+        f"  - Video reader               : {state.video_reader}\n"     
         f"\n Video stats\n"
         f"  - Total Frames               : {total_frames}\n"
         f"  - Video Duration             : {video_duration:.2f} s\n"
@@ -131,7 +162,7 @@ def log_performance(batch_task, results_queue):
 
     if SEQUENTIAL_MODE:
         log_message += f"\n Sequential Queue statistics\n"
-        for key, total_time in batch_task.profile.items():
+        for key, total_time in analyse_task.profile.items():
             if key.endswith("_duration"):  # Only include duration metrics
                 avg_time = total_time / total_frames if total_frames > 0 else 0.0
                 stage_name = key.replace("_duration", "").capitalize()
@@ -169,3 +200,4 @@ def log_performance(batch_task, results_queue):
     log_message += f"{'-' * 60}\n"
 
     print(Fore.LIGHTBLUE_EX + log_message)
+    print(Style.RESET_ALL, end="")

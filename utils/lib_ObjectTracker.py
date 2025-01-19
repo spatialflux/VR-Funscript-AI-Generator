@@ -1,7 +1,7 @@
 from utils import lib_KalmanFilter as KF
 from collections import deque
 import numpy as np
-from params.config import class_names
+from config import CLASS_NAMES
 import math
 import logging
 
@@ -79,7 +79,7 @@ class ObjectTracker:
             frame_pos (int): Current frame position.
             image_area (int): Area of the video frame.
         """
-        self.class_names = class_names  # List of class names to track
+        self.class_names = CLASS_NAMES  # List of class names to track
         self.active_tracks = {}  # Active tracks: {track_id: Track object}
         self.inactive_tracks = []  # Inactive tracks (lost tracks)
         self.distance_kf = KF.KalmanFilter()  # Kalman filter for distance smoothing
@@ -120,12 +120,12 @@ class ObjectTracker:
         self.pct_weights = {}  # Percentage weights for each track_id
 
         # Initialize normalized positions and distances
-        self.normalized_positions = {class_name: deque(maxlen=200) for class_name in class_names}
-        self.normalized_distances = {class_name: deque(maxlen=200) for class_name in class_names}
+        self.normalized_positions = {class_name: deque(maxlen=200) for class_name in CLASS_NAMES}
+        self.normalized_distances = {class_name: deque(maxlen=200) for class_name in CLASS_NAMES}
 
         # Detection thresholds
-        self.consecutive_detections = {class_name: 0 for class_name in class_names}
-        self.consecutive_non_detections = {class_name: 0 for class_name in class_names}
+        self.consecutive_detections = {class_name: 0 for class_name in CLASS_NAMES}
+        self.consecutive_non_detections = {class_name: 0 for class_name in CLASS_NAMES}
         self.detections_threshold = round(self.fps) / 10  # Threshold for considering a detection valid
 
         # Penetration state

@@ -1,15 +1,20 @@
 import logging
 import os
 import json
+import time
+
 from simplification.cutil import simplify_coords
 import numpy as np
 import cv2
 import datetime
 from scipy.signal import savgol_filter
 
-from params.config import heatmap_colors, step_size, vw_filter_coeff
+from config import HEATMAP_COLORS, STEP_SIZE
 
 import matplotlib
+
+from script_generator.utils.file import get_output_file_path
+
 matplotlib.use('Agg')  # Use a non-interactive backend
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -17,18 +22,19 @@ import matplotlib.colors as mcolors
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 
+
 class FunscriptGenerator:
-    def generate(self, global_state):
-        output_path = global_state.video_file[:-3] + f"funscript"
+    def generate(self, state):
+        output_path, _ = get_output_file_path(state.video_path, ".funscript")
 
         # Backup output file if it exists
         if os.path.exists(output_path):
-            print(f"Output path {output_path} already exists, backing up as {output_path}.bak...")
-            os.rename(output_path, output_path + ".bak")
+            print(f"Funscript {output_path} already exists, backing up as {output_path}_{time.time()}.bak...")
+            os.rename(output_path, output_path + f"_{time.time()}.bak")
 
-        raw_funscript_path = global_state.video_file[:-4] + f"_rawfunscript.json"
+        raw_funscript_path, _ = get_output_file_path(state.video_path, "_rawfunscript.json")
 
-        if len(global_state.funscript_data) == 0:
+        if len(state.funscript_data) == 0:
             print("len funscript data is 0, trying to load file")
             # Read the funscript data from the JSON file
             with open(raw_funscript_path, 'r') as f:
@@ -39,7 +45,7 @@ class FunscriptGenerator:
                     print(f"Error loading funscript from {raw_funscript_path}: {e}")
                     return
         else:
-            data = global_state.funscript_data
+            data = state.funscript_data
 
         try:
             print(f"Generating funscript based on {len(data)} points...")
@@ -50,15 +56,15 @@ class FunscriptGenerator:
 
             print(f"Positions adjustment - step 1 (noise removal)")
             # Run the Savitzky-Golay filter
-            positions = savgol_filter(positions, int(global_state.fps) // 4, 3)
+            positions = savgol_filter(positions, int(state.video_info.fps) // 4, 3)
 
             # zip adjusted positions
             zip_positions = list(zip(ats, positions))
 
             # Apply VW simplification if enabled
-            if global_state.vw_simplification_enabled:
+            if state.vw_simplification_enabled:
                 print("Positions adjustment - step 2 (VW algorithm simplification)")
-                zip_vw_positions = simplify_coords(zip_positions, global_state.vw_factor)
+                zip_vw_positions = simplify_coords(zip_positions, state.vw_factor)
                 print(f"Length of VW filtered positions: {len(zip_vw_positions)}")
             else:
                 print("Skipping positions adjustment - step 2 (VW algorithm simplification)")
@@ -72,41 +78,40 @@ class FunscriptGenerator:
             adjusted_positions = np.interp(positions, (min(positions), max(positions)), (0, 100))
 
             # Apply thresholding
-            if global_state.threshold_enabled:
+            if state.threshold_enabled:
                 print(f"Positions adjustment - step 4 (thresholding)")
                 adjusted_positions = adjusted_positions.tolist()  # Convert to list
                 adjusted_positions = [
-                    0 if p < global_state.threshold_low else 100 if p > global_state.threshold_high else p for p in
+                    0 if p < state.threshold_low else 100 if p > state.threshold_high else p for p in
                     adjusted_positions]
             else:
                 print("Skipping positions adjustment - step 4 (thresholding)")
 
             # Apply amplitude boosting
-            if global_state.boost_enabled:
+            if state.boost_enabled:
                 print("Positions adjustment - step 5 (amplitude boosting)")
-                #self.boost_amplitude(adjusted_positions, boost_factor=1.2, min_value=0, max_value=100)
+                # self.boost_amplitude(adjusted_positions, boost_factor=1.2, min_value=0, max_value=100)
                 adjusted_positions = self.adjust_peaks_and_lows(adjusted_positions,
-                                                                peak_boost=global_state.boost_up_percent,
-                                                                low_reduction=global_state.boost_down_percent)
+                                                                peak_boost=state.boost_up_percent,
+                                                                low_reduction=state.boost_down_percent)
             else:
                 print("Skipping positions adjustment - step 5 (amplitude boosting)")
 
             # Round position values to the closest multiple of 5, still between 0 and 100
             print("Positions adjustment - step 6 (rounding to the closest multiple of 5)")
-            #adjusted_positions = [round(p, -1) for p in adjusted_positions] # multiple of 10
-            adjusted_positions = [round(p / global_state.rounding) * global_state.rounding for p in adjusted_positions]
+            # adjusted_positions = [round(p, -1) for p in adjusted_positions] # multiple of 10
+            adjusted_positions = [round(p / state.rounding) * state.rounding for p in adjusted_positions]
 
             # Recombine timestamps and adjusted positions
             print("Re-assembling ats and positions")
             zip_adjusted_positions = list(zip(ats, adjusted_positions))
 
             # Write the final funscript
-            self.write_funscript(zip_adjusted_positions, output_path, global_state.fps)
+            self.write_funscript(zip_adjusted_positions, output_path, state.video_info.fps)
             print(f"Funscript generated and saved to {output_path}")
 
             # Generate a heatmap
-            self.generate_heatmap(output_path,
-                                  output_path[:-10] + f"_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png")
+            self.generate_heatmap(output_path, output_path[:-10] + f"_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png")
         except Exception as e:
             print(f"Error generating funscript: {e}")
 
@@ -135,27 +140,33 @@ class FunscriptGenerator:
             positions.insert(0, 100)
 
         # Print loaded data for debugging
-        #print(f"Times: {times}")
-        #print(f"Positions: {positions}")
+        # print(f"Times: {times}")
+        # print(f"Positions: {positions}")
         print(f"Total Actions: {len(times)}")
         print(f"Time Range: {times[0]} to {datetime.timedelta(seconds=int(times[-1] / 1000))}")
 
         # Calculate speed (position change per time interval)
-        speeds = np.abs(np.diff(positions) / np.diff(times)) * 1000  # Positions per second
+        valid_indices = ~np.isnan(times) & ~np.isnan(positions)
+        filtered_positions = positions[valid_indices]
+        filtered_times = times[valid_indices]
+
+        # Calculate speed (position change per time interval)
+        speeds = np.abs(np.diff(filtered_positions) / np.diff(filtered_times)) * 1000  # Positions per second
+
         print(f"Speeds: {speeds}")
 
         def get_color(intensity):
             if intensity <= 0:
-                return heatmap_colors[0]
-            if intensity > 5 * step_size:
-                return heatmap_colors[6]
-            intensity += step_size / 2.0
-            index = int(intensity // step_size)
-            t = (intensity - index * step_size) / step_size
+                return HEATMAP_COLORS[0]
+            if intensity > 5 * STEP_SIZE:
+                return HEATMAP_COLORS[6]
+            intensity += STEP_SIZE / 2.0
+            index = int(intensity // STEP_SIZE)
+            t = (intensity - index * STEP_SIZE) / STEP_SIZE
             return [
-                heatmap_colors[index][0] + (heatmap_colors[index + 1][0] - heatmap_colors[index][0]) * t,
-                heatmap_colors[index][1] + (heatmap_colors[index + 1][1] - heatmap_colors[index][1]) * t,
-                heatmap_colors[index][2] + (heatmap_colors[index + 1][2] - heatmap_colors[index][2]) * t
+                HEATMAP_COLORS[index][0] + (HEATMAP_COLORS[index + 1][0] - HEATMAP_COLORS[index][0]) * t,
+                HEATMAP_COLORS[index][1] + (HEATMAP_COLORS[index + 1][1] - HEATMAP_COLORS[index][1]) * t,
+                HEATMAP_COLORS[index][2] + (HEATMAP_COLORS[index + 1][2] - HEATMAP_COLORS[index][2]) * t
             ]
 
         # Create figure and plot
@@ -191,10 +202,10 @@ class FunscriptGenerator:
 
         # Add colorbar
         cmap = mcolors.LinearSegmentedColormap.from_list("custom_heatmap", [
-            (heatmap_colors[i][0] / 255, heatmap_colors[i][1] / 255, heatmap_colors[i][2] / 255) for i in
-            range(len(heatmap_colors))
+            (HEATMAP_COLORS[i][0] / 255, HEATMAP_COLORS[i][1] / 255, HEATMAP_COLORS[i][2] / 255) for i in
+            range(len(HEATMAP_COLORS))
         ])
-        norm = mcolors.Normalize(vmin=0, vmax=5 * step_size)
+        norm = mcolors.Normalize(vmin=0, vmax=5 * STEP_SIZE)
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         # cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', pad=0.2,
@@ -346,13 +357,14 @@ class FunscriptGenerator:
 
         return times, positions, relevant_chapters_export, irrelevant_chapters_export
 
-    def create_report_funscripts(self, global_state):
+    def create_report_funscripts(self, state):
         generated_paths = []
-        generated_paths.append(global_state.video_file[:-4] + ".funscript")
+        output_path, _ = get_output_file_path(state.video_path, ".funscript")
+        generated_paths.append(output_path)
 
-        if global_state.reference_script:
+        if state.reference_script:
             # Load reference funscript
-            ref_times, ref_positions, _, _ = self.load_funscript(global_state.reference_script)
+            ref_times, ref_positions, _, _ = self.load_funscript(state.reference_script)
 
             # if no 0 at the beginning, add it
             if ref_times and ref_times[0] != 0:
@@ -379,7 +391,7 @@ class FunscriptGenerator:
             ref_sections = []
             gen_sections = []
             for start, end in sections:
-                if global_state.reference_script:
+                if state.reference_script:
                     ref_sec = self.extract_section(ref_times, ref_positions, start, end)
                     ref_sections.append(ref_sec)
                 gen_sec = self.extract_section(gen_times, gen_positions, start, end)
@@ -387,15 +399,15 @@ class FunscriptGenerator:
 
             if not screenshots_done:
                 # Capture screenshots, but only once
-                screenshots = self.capture_screenshots(global_state.video_file, global_state.isVR, sections)
+                screenshots = self.capture_screenshots(state.video_path, state.video_info.is_vr, sections)
                 screenshots_done = True
 
             # Plot and combine
+            report_path, _ = get_output_file_path(state.video_path, "_report.png")
             self.create_combined_plot(
-                ref_sections, gen_sections, screenshots, sections, global_state.video_file[:-4] + "_report.png",
+                ref_sections, gen_sections, screenshots, sections, report_path,
                 ref_times, ref_positions, gen_times, gen_positions
             )
-
 
     def select_random_sections(self, total_duration, section_duration=10, num_sections=6):
         sections = []
@@ -430,13 +442,13 @@ class FunscriptGenerator:
         indices = [i for i, t in enumerate(times) if start_ms <= t <= end_ms]
         return [times[i] for i in indices], [positions[i] for i in indices]
 
-    def capture_screenshots(self, video_path, isVR, sections):
+    def capture_screenshots(self, video_path, is_vr, sections):
         cap = cv2.VideoCapture(video_path)
         screenshots = []
         for start, _ in sections:
             cap.set(cv2.CAP_PROP_POS_MSEC, start * 1000)
             ret, frame = cap.read()
-            if isVR: # left side of the frame only
+            if is_vr:  # left side of the frame only
                 frame = frame[:, :frame.shape[1] // 2]
             if ret:
                 screenshots.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -445,8 +457,7 @@ class FunscriptGenerator:
         cap.release()
         return screenshots
 
-    def create_combined_plot(self, ref_sections, gen_sections, screenshots, sections, output_image_path, ref_times,
-                                 ref_positions, gen_times, gen_positions):
+    def create_combined_plot(self, ref_sections, gen_sections, screenshots, sections, output_image_path, ref_times, ref_positions, gen_times, gen_positions):
         """
         Creates a combined plot with heatmaps as a header, comparative information, and section comparisons below.
 
@@ -461,6 +472,7 @@ class FunscriptGenerator:
             gen_times (list): Times from the generated funscript.
             gen_positions (list): Positions from the generated funscript.
         """
+
         # Create a flexible grid layout
         fig = plt.figure(figsize=(28, 24))
         gs = gridspec.GridSpec(5, 4, height_ratios=[1, .5, 2, 2, 2], width_ratios=[1, 2, 1, 2])
@@ -497,7 +509,8 @@ class FunscriptGenerator:
             f"Generated:\n"
             f"Number of Strokes: {gen_metrics['num_strokes']}\n"
             f"Avg Stroke Duration: {gen_metrics['avg_stroke_duration']:.2f}s\n"
-            f"Avg Speed: {int(gen_metrics['avg_speed'])} positions/s\n"
+            # TODO re-enable
+            # f"Avg Speed: {int(gen_metrics['avg_speed'])} positions/s\n"
             f"Avg Depth of Stroke: {int(gen_metrics['avg_depth'])}\n"
             f"Avg Max: {int(gen_metrics['avg_max'])}\n"
             f"Avg Min: {int(gen_metrics['avg_min'])}"
@@ -513,12 +526,12 @@ class FunscriptGenerator:
                     break
 
                 # Screenshot (first column)
-                ax_screenshot = fig.add_subplot(gs[i-1, j * 2])
+                ax_screenshot = fig.add_subplot(gs[i - 1, j * 2])
                 ax_screenshot.imshow(screenshots[idx])
                 ax_screenshot.axis('off')
 
                 # Funscript comparison (second column)
-                ax_plot = fig.add_subplot(gs[i-1, j * 2 + 1])
+                ax_plot = fig.add_subplot(gs[i - 1, j * 2 + 1])
                 # Scale the y axis 0 to 100
                 ax_plot.set_ylim(0, 100)
                 gen_times_sec = [t / 1000 for t in gen_sections[idx][0]]
@@ -555,20 +568,45 @@ class FunscriptGenerator:
             return
 
         # Calculate speed (position change per time interval)
-        speeds = np.abs(np.diff(positions) / np.diff(times)) * 1000  # Positions per second
+        # Filter out NaN values from times and positions
+        # TODO filter nan at one logical moment
+        times = np.array(times, dtype=float)  # Ensure times is a float array
+        positions = np.array(positions, dtype=float)  # Ensure positions is a float array
+
+        # Filter out NaN values
+        valid_indices = ~np.isnan(times) & ~np.isnan(positions)
+        filtered_positions = positions[valid_indices]
+        filtered_times = times[valid_indices]
+
+        # Ensure at least two valid points for speed calculation
+        if len(filtered_times) > 1:
+            time_diffs = np.diff(filtered_times)
+            pos_diffs = np.diff(filtered_positions)
+
+            # Replace zero or negative time differences with NaN to prevent invalid division
+            time_diffs[time_diffs <= 0] = np.nan
+
+            # Calculate speeds, ignoring invalid divisions
+            speeds = np.abs(pos_diffs / time_diffs) * 1000  # Positions per second
+            speeds = np.nan_to_num(speeds, nan=0.0)  # Replace NaN values in speeds with 0
+        else:
+            speeds = np.array([])  # Empty array if not enough valid data points
+        # TODO filter nan at one logical moment END
 
         def get_color(intensity):
+            if np.isnan(intensity):
+                return [128, 128, 128]
             if intensity <= 0:
-                return heatmap_colors[0]
-            if intensity > 5 * step_size:
-                return heatmap_colors[-1]
-            intensity += step_size / 2.0
-            index = int(intensity // step_size)
-            t = (intensity - index * step_size) / step_size
+                return HEATMAP_COLORS[0]
+            if intensity > 5 * STEP_SIZE:
+                return HEATMAP_COLORS[-1]
+            intensity += STEP_SIZE / 2.0
+            index = int(intensity // STEP_SIZE)
+            t = (intensity - index * STEP_SIZE) / STEP_SIZE
             return [
-                heatmap_colors[index][0] + (heatmap_colors[index + 1][0] - heatmap_colors[index][0]) * t,
-                heatmap_colors[index][1] + (heatmap_colors[index + 1][1] - heatmap_colors[index][1]) * t,
-                heatmap_colors[index][2] + (heatmap_colors[index + 1][2] - heatmap_colors[index][2]) * t
+                HEATMAP_COLORS[index][0] + (HEATMAP_COLORS[index + 1][0] - HEATMAP_COLORS[index][0]) * t,
+                HEATMAP_COLORS[index][1] + (HEATMAP_COLORS[index + 1][1] - HEATMAP_COLORS[index][1]) * t,
+                HEATMAP_COLORS[index][2] + (HEATMAP_COLORS[index + 1][2] - HEATMAP_COLORS[index][2]) * t
             ]
 
         # Draw lines between points with colors based on speed
@@ -587,8 +625,17 @@ class FunscriptGenerator:
             ax.plot([x_start, x_end], [y_start, y_end], color=line_color, linewidth=2)
 
         # Customize plot
+        # Safely calculate the mean speed
+        # TODO fix nan at source
+        if len(speeds) == 0 or np.isnan(np.mean(speeds)):
+            avg_speed = 0  # Default to 0 if speeds are empty or contain NaN
+        else:
+            avg_speed = int(np.nanmean(speeds))  # Use nanmean to ignore NaN values
+
+        # Set title with safe average speed
         ax.set_title(
-            f'Funscript Heatmap\nDuration: {datetime.timedelta(seconds=int(times[-1] / 1000))} - Avg. Speed {int(np.mean(speeds))} - Actions: {len(times)}')
+            f'Funscript Heatmap\nDuration: {datetime.timedelta(seconds=int(times[-1] / 1000))} - Avg. Speed {avg_speed} - Actions: {len(times)}'
+        )
         ax.set_xlabel('Time (s)')
         ax.set_yticks(np.arange(0, 101, 10))
         ax.set_xlim(times[0] / 1000, times[-1] / 1000)
@@ -600,10 +647,10 @@ class FunscriptGenerator:
 
         # Add colorbar
         cmap = LinearSegmentedColormap.from_list("custom_heatmap", [
-            (heatmap_colors[i][0] / 255, heatmap_colors[i][1] / 255, heatmap_colors[i][2] / 255) for i in
-            range(len(heatmap_colors))
+            (HEATMAP_COLORS[i][0] / 255, HEATMAP_COLORS[i][1] / 255, HEATMAP_COLORS[i][2] / 255) for i in
+            range(len(HEATMAP_COLORS))
         ])
-        norm = Normalize(vmin=0, vmax=5 * step_size)
+        norm = Normalize(vmin=0, vmax=5 * STEP_SIZE)
         sm = ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
 
@@ -629,9 +676,32 @@ class FunscriptGenerator:
         avg_stroke_duration = np.mean(stroke_durations)
 
         # Calculate average speed
-        speeds = np.abs(np.diff(positions) / np.diff(times)) * 1000  # Positions per second
-        #speeds = np.abs(np.diff(positions) / stroke_durations)
+        # Filter out NaN values from times and positions
+        # TODO filter in one place find out why we have nan's
+        times = np.array(times, dtype=float)  # Ensure times is a float array
+        positions = np.array(positions, dtype=float)  # Ensure positions is a float array
+
+        valid_indices = ~np.isnan(times) & ~np.isnan(positions)
+        filtered_positions = positions[valid_indices]
+        filtered_times = times[valid_indices]
+
+        # Ensure at least two valid points for speed calculation
+        if len(filtered_times) > 1:
+            time_diffs = np.diff(filtered_times).astype(float)  # Convert to float explicitly
+            pos_diffs = np.diff(filtered_positions)
+
+            # Prevent division by zero
+            time_diffs[time_diffs == 0] = np.nan  # Replace zero time differences with NaN
+
+            # Calculate speeds, ignoring invalid divisions
+            speeds = np.abs(pos_diffs / time_diffs) * 1000  # Positions per second
+            speeds = np.nan_to_num(speeds, nan=0.0)  # Replace NaN values with 0
+        else:
+            speeds = np.array([])  # Empty array if not enough valid data points
+
+        # Calculate average speed
         avg_speed = np.mean(speeds)
+        # TODO filter in one place find out why we have nan's END
 
         # Calculate average depth of stroke
         depths = np.abs(np.diff(positions))
@@ -648,7 +718,7 @@ class FunscriptGenerator:
             'avg_depth': avg_depth,
             'avg_max': avg_max,
             'avg_min': avg_min
-            }
+        }
 
     def adjust_peaks_and_lows(self, positions, peak_boost=10, low_reduction=10, max_flat_length=5):
         """
@@ -788,11 +858,11 @@ class FunscriptGenerator:
                 return True
         return False
 
-if __name__ == "__main__":
-    video_path = "/Users/k00gar/Downloads/SLR_SLR Originals_Vote for me_1920p_51071_FISHEYE190_alpha.mp4"
-
-    funscript_handler = FunscriptGenerator()
-
-    # generate heatmap
-    funscript_handler.generate_heatmap(video_path[:-4] + ".funscript", video_path[
-                                                                        :-4] + f"_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png")
+# if __name__ == "__main__":
+#     video_path = "/Users/k00gar/Downloads/SLR_SLR Originals_Vote for me_1920p_51071_FISHEYE190_alpha.mp4"
+#
+#     funscript_handler = FunscriptGenerator()
+#
+#     # generate heatmap
+#     funscript_handler.generate_heatmap(video_path[:-4] + ".funscript", video_path[
+#                                                                         :-4] + f"_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.png")

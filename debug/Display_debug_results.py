@@ -6,7 +6,7 @@ video = "/Users/k00gar/Downloads/703-czechvr-3d-2160x1080-60fps-smartphone_hq.mp
 
 frame = (44 * 60 + 26) * 60
 
-debugger = Debugger(video, isVR=True, video_reader="FFmpeg", output_dir=video[:-4])
+debugger = Debugger(video, is_vr=True, video_reader="FFmpeg", output_dir=video[:-4])
 
 debugger.load_logs()
 

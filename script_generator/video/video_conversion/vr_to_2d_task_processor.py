@@ -1,10 +1,13 @@
+import os
+
+import imageio
 import numpy as np
 import glfw
 from OpenGL.GL import *
 from OpenGL.GLU import *
 
-from script_generator.config import RENDER_RESOLUTION, YAW, PITCH
-from script_generator.video_conversion.opengl.helpers import create_180_dome, render_dome
+from script_generator.config import RENDER_RESOLUTION, YAW, PITCH, DEBUG_PATH
+from script_generator.video.video_conversion.opengl.helpers import create_180_dome, render_dome
 from script_generator.tasks.abstract_task_processor import AbstractTaskProcessor, TaskProcessorTypes
 
 
@@ -51,7 +54,8 @@ class VrTo2DTaskProcessor(AbstractTaskProcessor):
         # Render to off-screen buffer
         glViewport(0, 0, RENDER_RESOLUTION, RENDER_RESOLUTION)
         glLoadIdentity()
-        gluLookAt(0, 0, 0, 0, 0, -1, 0, 1, 0)
+        # the 3th parameter will zoom in and out to increase / decrease the FOV
+        gluLookAt(0, 0, 0.5, 0, 0, -1, 0, 1, 0)
         glRotatef(-YAW, 0, 1, 0)
         glRotatef(-(PITCH + 90), 1, 0, 0)
 
